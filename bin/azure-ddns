@@ -127,17 +127,47 @@ fi
 
 if [[ -z "$TOKEN" ]]; then
     log "minting new Azure access token..."
-    RESP=$(curl -fsS --max-time 15 \
+    # No -f: keep the body on 4xx so we can surface AAD's AADSTS error code.
+    HTTP=$(curl -sS --max-time 15 -w $'\n%{http_code}' \
         -X POST "https://login.microsoftonline.com/${AZ_TENANT_ID}/oauth2/v2.0/token" \
         -H "Content-Type: application/x-www-form-urlencoded" \
         --data-urlencode "grant_type=client_credentials" \
         --data-urlencode "client_id=${AZ_CLIENT_ID}" \
         --data-urlencode "client_secret=${AZ_CLIENT_SECRET}" \
-        --data-urlencode "scope=https://management.azure.com/.default") \
-        || die "token request failed"
+        --data-urlencode "scope=https://management.azure.com/.default" 2>&1) \
+        || die "token request failed (network/DNS): $HTTP"
+    CODE="${HTTP##*$'\n'}"
+    RESP="${HTTP%$'\n'*}"
+
+    if [[ "$CODE" != "200" ]]; then
+        DESC=$(echo "$RESP" | jq -r '.error_description // empty' 2>/dev/null || true)
+        AADSTS=$(echo "$DESC" | grep -oE 'AADSTS[0-9]+' | head -1 || true)
+        ROTATE="az ad sp credential reset --id ${AZ_CLIENT_ID} --years 2 --append"
+        case "$AADSTS" in
+            AADSTS7000222)
+                die "Azure SP client secret has EXPIRED. Rotate with: $ROTATE — then update AZ_CLIENT_SECRET in $ENV_FILE and 'systemctl restart azure-ddns.service'. (--append keeps the old secret valid during cutover.) AAD: $DESC"
+                ;;
+            AADSTS7000215)
+                die "Azure rejected AZ_CLIENT_SECRET as invalid. Check $ENV_FILE for typos/whitespace, or rotate: $ROTATE. AAD: $DESC"
+                ;;
+            AADSTS700016)
+                die "Azure does not recognize AZ_CLIENT_ID=$AZ_CLIENT_ID in tenant $AZ_TENANT_ID. Verify both in $ENV_FILE. AAD: $DESC"
+                ;;
+            AADSTS90002)
+                die "Azure tenant $AZ_TENANT_ID not found. Verify AZ_TENANT_ID in $ENV_FILE. AAD: $DESC"
+                ;;
+            "")
+                die "token request HTTP $CODE (non-AAD response): $RESP"
+                ;;
+            *)
+                die "token request rejected by Azure ($AADSTS): $DESC"
+                ;;
+        esac
+    fi
+
     TOKEN=$(echo "$RESP" | jq -r '.access_token // empty')
     EXPIRES_IN=$(echo "$RESP" | jq -r '.expires_in // 3600')
-    [[ -n "$TOKEN" ]] || die "token request returned empty access_token: $RESP"
+    [[ -n "$TOKEN" ]] || die "token request returned HTTP 200 but empty access_token: $RESP"
     EXPIRES_AT=$(($(date +%s) + EXPIRES_IN))
     echo "$RESP" | jq ". + {\"expires_at\": $EXPIRES_AT}" > "$TOKEN_CACHE"
     chmod 600 "$TOKEN_CACHE"
