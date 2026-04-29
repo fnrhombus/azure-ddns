@@ -1,0 +1,47 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck bin/azure-ddns
+        run: shellcheck bin/azure-ddns
+      - name: shellcheck dispatcher hook
+        run: shellcheck dispatcher.d/90-azure-ddns
+
+  syntax:
+    name: bash -n
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n bin/azure-ddns
+      - run: bash -n dispatcher.d/90-azure-ddns
+
+  systemd-units:
+    name: systemd-analyze verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: stage azure-ddns binary so ExecStart resolves
+        run: sudo install -Dm755 bin/azure-ddns /usr/bin/azure-ddns
+      - name: verify .service and .timer
+        run: systemd-analyze verify systemd/azure-ddns.service systemd/azure-ddns.timer
+
+  namcap:
+    name: namcap PKGBUILD
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install namcap
+        run: pacman -Syu --noconfirm namcap
+      - name: namcap PKGBUILD
+        run: namcap PKGBUILD
