@@ -10,8 +10,11 @@ Fills a real gap: `ddclient` has no Azure protocol ([ddclient#517](https://githu
 
 ### Arch / AUR
 
+Two flavors are published — install one (they conflict with each other):
+
 ```
-yay -S azure-ddns
+yay -S azure-ddns          # stable release flavor; follows GitHub releases
+yay -S azure-ddns-git      # builds from main HEAD; for early adopters
 ```
 
 ### From source (any systemd distro)
