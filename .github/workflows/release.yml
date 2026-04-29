@@ -1,0 +1,135 @@
+# Publishes azure-ddns to the AUR on every GitHub release, and azure-ddns-git
+# on every push to main. PR runs do a clean-room makepkg build only (no push).
+#
+# Required repo secrets:
+#   AUR_USERNAME         e.g. fnrhombus
+#   AUR_EMAIL            commit author for the AUR push
+#   AUR_SSH_PRIVATE_KEY  ED25519 private key whose pubkey is registered at
+#                        https://aur.archlinux.org/account/ (use a dedicated key)
+
+name: release
+
+on:
+  release:
+    types: [published]
+  push:
+    branches: [main]
+    paths:
+      - 'bin/**'
+      - 'systemd/**'
+      - 'dispatcher.d/**'
+      - 'azure-ddns.env.template'
+      - 'aur/**'
+      - '.github/workflows/release.yml'
+  pull_request:
+    paths:
+      - 'aur/**'
+      - 'bin/**'
+      - 'systemd/**'
+      - 'dispatcher.d/**'
+      - 'azure-ddns.env.template'
+
+# Don't cancel an in-flight release — a half-published AUR push is worse than
+# a duplicate run.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # PR validation: real makepkg build inside an Arch container. No secrets,
+  # no AUR push. Catches PKGBUILD breakage before merge in a way that the
+  # static checks in ci.yml can't.
+  # ---------------------------------------------------------------------------
+  validate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    container:
+      image: archlinux:base-devel
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [azure-ddns, azure-ddns-git]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # azure-ddns-git's pkgver() needs git history
+
+      - name: Install build tools
+        run: |
+          pacman -Syu --noconfirm --needed git namcap pacman-contrib sudo
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+
+      - name: Build ${{ matrix.flavor }}
+        run: |
+          cp -r aur/${{ matrix.flavor }} /tmp/build
+          # azure-ddns-git's pkgver() runs `git describe` against the source;
+          # it sources from $url.git and clones at build time, so no need to
+          # share the workspace's .git.
+          chown -R builder:builder /tmp/build
+          su builder -c 'cd /tmp/build && [[ -f PKGBUILD ]] && \
+            { grep -q "^source=.*archive/refs/tags" PKGBUILD && updpkgsums || true; } && \
+            makepkg -s --noconfirm --clean --cleanbuild'
+          su builder -c 'cd /tmp/build && namcap PKGBUILD && namcap *.pkg.tar.zst'
+
+  # ---------------------------------------------------------------------------
+  # Stable release → aur/azure-ddns. Triggered by GitHub release publish.
+  # ---------------------------------------------------------------------------
+  publish-stable:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Bump pkgver to release tag
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          cd aur/azure-ddns
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+          cat PKGBUILD
+
+      - name: Publish azure-ddns to the AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.3
+        with:
+          pkgname: azure-ddns
+          pkgbuild: ./aur/azure-ddns/PKGBUILD
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Release ${{ github.event.release.tag_name }}"
+          # Refresh sha256sums against the new tagged tarball before push.
+          updpkgsums: true
+          # Build inside the action's archlinux container; abort the AUR push
+          # if the package fails to build.
+          test: true
+          test_flags: --clean --cleanbuild --nodeps --syncdeps --noconfirm
+          ssh_keyscan_types: rsa,ecdsa,ed25519
+
+  # ---------------------------------------------------------------------------
+  # Rolling -git package → aur/azure-ddns-git. Triggered on push to main.
+  # No sed (pkgver() computes from git describe), no updpkgsums (SKIP sums).
+  # ---------------------------------------------------------------------------
+  publish-git:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Publish azure-ddns-git to the AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.3
+        with:
+          pkgname: azure-ddns-git
+          pkgbuild: ./aur/azure-ddns-git/PKGBUILD
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Sync with ${{ github.sha }}"
+          updpkgsums: false
+          test: true
+          test_flags: --clean --cleanbuild --nodeps --syncdeps --noconfirm
+          ssh_keyscan_types: rsa,ecdsa,ed25519
