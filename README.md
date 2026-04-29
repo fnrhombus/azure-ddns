@@ -71,12 +71,32 @@ AZ_DNS_ZONE=example.com
 AZ_DNS_RECORD=myhost           # becomes myhost.example.com
 
 # Optional:
-# AZ_DNS_TTL=300                          # default 300s
+# AZ_DNS_TTL=300                          # default 300s — see "TTL and timer cadence" below
 # DDNS_DISABLE_IPV4=1                     # IPv6-only mode
 # DDNS_DISABLE_IPV6=1                     # IPv4-only mode
 # AZURE_DDNS_IPV6_SELECT=slaac-stable     # see "IPv6 address selection" below
 # AZURE_DDNS_IPV6_IFACE=eth0              # scope discovery to one iface
 ```
+
+#### TTL and timer cadence
+
+The shipped timer fires every 5 minutes (`OnUnitActiveSec=5min`), matching the default `AZ_DNS_TTL=300`. The rule of thumb is **timer interval ≤ TTL**: polling more often than TTL is wasted work (resolvers cap at TTL anyway), polling less often risks the authoritative record lagging real life for longer than the TTL implies.
+
+If you raise `AZ_DNS_TTL`, raise the timer interval to match:
+
+```bash
+sudo systemctl edit azure-ddns.timer
+```
+
+Then in the override drop-in:
+
+```ini
+[Timer]
+OnUnitActiveSec=
+OnUnitActiveSec=1h
+```
+
+(The empty assignment clears the inherited value before setting the new one — required by systemd or both intervals will fire.)
 
 ### 3. Kick the first run
 
@@ -103,7 +123,7 @@ dig AAAA myhost.example.com +short
 - Caches last-pushed values at `/var/lib/azure-ddns/{a,aaaa}.last`. If nothing changed, the run exits early with no Azure traffic.
 - Caches the OAuth2 client-credentials token at `/run/azure-ddns-token.json` (1h TTL). Minted lazily on first IP change after a reboot.
 - Uses `PUT` (CreateOrUpdate) against `api-version=2018-05-01`, so first run creates the record if it doesn't exist.
-- `OnBootSec=2min`, `OnUnitActiveSec=10min` — timer cadence. NetworkManager dispatcher also fires on interface-up so link reconnects don't wait for the next tick.
+- Timer cadence: `OnBootSec=2min`, `OnUnitActiveSec=5min` — matched to the default `AZ_DNS_TTL=300`. NetworkManager dispatcher also fires on interface up/down events, so link reconnects don't wait for the next tick.
 
 ## IPv6 address selection
 

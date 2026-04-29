@@ -2,11 +2,15 @@
 Description=azure-ddns: periodic re-check
 
 [Timer]
-# 2 min after boot, then every 10 min. Cheap when nothing changed (one
-# ipify probe per enabled stack, no Azure traffic), so 10 min is fine.
+# 2 min after boot, then every 5 min — matches the default AZ_DNS_TTL of
+# 300s. Polling more often than TTL is wasted work (resolvers cap at TTL
+# anyway); polling less often risks the authoritative record lagging the
+# actual IP for longer than users expect from the published TTL.
+# If you raise AZ_DNS_TTL, raise OnUnitActiveSec to match via
+# `systemctl edit azure-ddns.timer` — see README.
 # Persistent=true catches up if the host was suspended past a tick.
 OnBootSec=2min
-OnUnitActiveSec=10min
+OnUnitActiveSec=5min
 Persistent=true
 
 [Install]
