@@ -45,3 +45,13 @@ jobs:
         run: pacman -Syu --noconfirm namcap
       - name: namcap PKGBUILD
         run: namcap PKGBUILD
+
+  bats:
+    name: bats unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install bats + jq
+        run: sudo apt-get update && sudo apt-get install -y bats jq
+      - name: run unit tests
+        run: bats tests/

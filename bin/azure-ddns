@@ -19,6 +19,63 @@ log()  { printf 'azure-ddns: %s\n' "$*"; }
 warn() { printf 'azure-ddns: WARN %s\n' "$*" >&2; }
 die()  { printf 'azure-ddns: ERR %s\n' "$*" >&2; exit 1; }
 
+# Pick an IPv6 GUA from the local host per AZURE_DDNS_IPV6_SELECT.
+# Modes: slaac-stable (default), slaac-temporary, static, or a literal IPv6.
+# Optional AZURE_DDNS_IPV6_IFACE scopes discovery to one interface.
+# Filters to global unicast (2000::/3) only — excludes ULA, link-local, multicast.
+# Tie-breaks by longest preferred lifetime. Empty stdout if nothing matches.
+pick_ipv6() {
+    local mode iface json type_filter
+    mode="${AZURE_DDNS_IPV6_SELECT:-slaac-stable}"
+    iface="${AZURE_DDNS_IPV6_IFACE:-}"
+
+    case "$mode" in
+        slaac-stable)
+            type_filter='.dynamic==true and (.temporary // false)==false'
+            ;;
+        slaac-temporary)
+            type_filter='(.temporary // false)==true'
+            ;;
+        static)
+            type_filter='(.dynamic // false)==false and (.temporary // false)==false'
+            ;;
+        *:*)
+            type_filter=''
+            ;;
+        *)
+            die "AZURE_DDNS_IPV6_SELECT='$mode' invalid (expected: slaac-stable | slaac-temporary | static | <ipv6-literal>)"
+            ;;
+    esac
+
+    local ip_args=(-j -6 addr show scope global)
+    [[ -n "$iface" ]] && ip_args+=(dev "$iface")
+
+    json=$(ip "${ip_args[@]}" 2>/dev/null) || return 0
+    [[ -n "$json" && "$json" != "[]" ]] || return 0
+
+    if [[ -n "$type_filter" ]]; then
+        jq -r "
+            [.[].addr_info[]
+             | select(.family==\"inet6\")
+             | select((.local | test(\"^[23]\")))
+             | select($type_filter)
+             | select((.deprecated // false)==false and (.tentative // false)==false)
+             | [(.preferred_life_time // 0), .local]]
+            | sort_by(.[0]) | reverse | .[0][1] // empty" <<<"$json"
+    else
+        local result
+        result=$(jq -r --arg ip "$mode" '
+            [.[].addr_info[]
+             | select(.family=="inet6" and .local==$ip)
+             | .local][0] // empty' <<<"$json")
+        [[ -n "$result" ]] || warn "AZURE_DDNS_IPV6_SELECT='$mode' not found among host's global IPv6 addresses"
+        printf '%s' "$result"
+    fi
+}
+
+# Allow sourcing for unit tests; only run main flow when executed directly.
+[[ "${BASH_SOURCE[0]}" != "$0" ]] && return 0
+
 [[ -r "$ENV_FILE" ]] || die "$ENV_FILE not readable — see README for service-principal setup"
 # shellcheck disable=SC1090
 . "$ENV_FILE"
@@ -29,8 +86,10 @@ done
 
 mkdir -p "$CACHE_DIR"
 
-# ipify's ipv4-only / ipv6-only hostnames force the stack we want;
-# api.ipify.org is dual-stack and would return whichever curl picks.
+# IPv4 needs ipify because hosts behind NAT can't see their public address
+# locally; the v4-only hostname forces the stack so curl can't fall back to v6.
+# IPv6 GUAs are routable directly, so we introspect the host instead — see
+# pick_ipv6() above and AZURE_DDNS_IPV6_SELECT in the README.
 # Either stack can be disabled via DDNS_DISABLE_IPV4 / DDNS_DISABLE_IPV6.
 IPV4=""
 IPV6=""
@@ -38,7 +97,7 @@ if [[ "${DDNS_DISABLE_IPV4:-0}" != "1" ]]; then
     IPV4=$(curl -4 -fsS --max-time 10 https://api.ipify.org 2>/dev/null || true)
 fi
 if [[ "${DDNS_DISABLE_IPV6:-0}" != "1" ]]; then
-    IPV6=$(curl -6 -fsS --max-time 10 https://api6.ipify.org 2>/dev/null || true)
+    IPV6=$(pick_ipv6 || true)
 fi
 
 if [[ -z "$IPV4" && -z "$IPV6" ]]; then

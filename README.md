@@ -71,9 +71,11 @@ AZ_DNS_ZONE=example.com
 AZ_DNS_RECORD=myhost           # becomes myhost.example.com
 
 # Optional:
-# AZ_DNS_TTL=300               # default 300s
-# DDNS_DISABLE_IPV4=1          # IPv6-only mode
-# DDNS_DISABLE_IPV6=1          # IPv4-only mode
+# AZ_DNS_TTL=300                          # default 300s
+# DDNS_DISABLE_IPV4=1                     # IPv6-only mode
+# DDNS_DISABLE_IPV6=1                     # IPv4-only mode
+# AZURE_DDNS_IPV6_SELECT=slaac-stable     # see "IPv6 address selection" below
+# AZURE_DDNS_IPV6_IFACE=eth0              # scope discovery to one iface
 ```
 
 ### 3. Kick the first run
@@ -96,11 +98,29 @@ dig AAAA myhost.example.com +short
 
 ## How it works
 
-- Detects public IPs via `api.ipify.org` (v4) and `api6.ipify.org` (v6). The stack-specific hostnames force which family `curl` uses; the plain dual-stack host would otherwise return whichever family routes first.
-- Caches last-pushed values at `/var/lib/azure-ddns/{a,aaaa}.last`. If nothing changed, the run exits early with no Azure traffic (one cheap ipify probe per enabled stack).
+- IPv4 detection uses `api.ipify.org` because hosts behind NAT can't see their own public address. The v4-only hostname forces `curl` to use that stack.
+- IPv6 detection introspects the local host (`ip -j -6 addr show scope global`) — IPv6 GUAs are routable directly, so there's no need for a third-party "what's my IP" service. See [IPv6 address selection](#ipv6-address-selection) below.
+- Caches last-pushed values at `/var/lib/azure-ddns/{a,aaaa}.last`. If nothing changed, the run exits early with no Azure traffic.
 - Caches the OAuth2 client-credentials token at `/run/azure-ddns-token.json` (1h TTL). Minted lazily on first IP change after a reboot.
 - Uses `PUT` (CreateOrUpdate) against `api-version=2018-05-01`, so first run creates the record if it doesn't exist.
 - `OnBootSec=2min`, `OnUnitActiveSec=10min` — timer cadence. NetworkManager dispatcher also fires on interface-up so link reconnects don't wait for the next tick.
+
+## IPv6 address selection
+
+Most hosts have multiple global IPv6 addresses — typically a stable SLAAC address plus a rotating RFC 4941 temporary one. For DDNS you want the *stable* one; publishing a temporary address would churn the DNS record every ~24h.
+
+`AZURE_DDNS_IPV6_SELECT` controls which address gets published. Modes:
+
+| Mode | Picks |
+|---|---|
+| `slaac-stable` (default) | Kernel-managed stable SLAAC GUA. Right for most home/lab setups. |
+| `slaac-temporary` | RFC 4941 temporary address. Rotates every ~24h — only useful for testing. |
+| `static` | Admin-configured (non-SLAAC, non-temporary). Today this also matches DHCPv6-assigned addresses (see [#1](https://github.com/fnrhombus/azure-ddns/issues/1)). |
+| `<ipv6-literal>` | Exact-match against the host's global addresses, e.g. `2001:db8::1`. |
+
+Discovery filters to global unicast (`2000::/3`) only — ULA, link-local, multicast, deprecated, and tentative addresses are excluded. When multiple candidates match, the one with the longest preferred lifetime wins.
+
+`AZURE_DDNS_IPV6_IFACE` (optional) scopes discovery to a single interface. Default scans all.
 
 ## Troubleshooting
 
